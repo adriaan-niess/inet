@@ -17,38 +17,28 @@
 
 package inet.protocol.ethernet;
 
+import inet.common.MessageDispatcher;
 import inet.linklayer.contract.IEthernetInterface;
 import inet.networklayer.common.InterfaceEntry;
 import inet.protocol.common.InterPacketGap;
-import inet.protocol.common.PacketEmitter;
-import inet.protocol.common.PacketStreamer;
-import inet.protocol.common.PaddingInserter;
-import inet.protocol.common.PreemptibleStreamer;
 import inet.protocol.common.ProtocolChecker;
 import inet.protocol.fragmentation.FragmentTagBasedDefragmenter;
-import inet.protocol.ieee8021q.IIeee8021qChecker;
-import inet.protocol.ieee8021q.IIeee8021qInserter;
 import inet.protocol.ieee8022.IIeee8022LlcChecker;
 import inet.protocol.ieee8022.IIeee8022LlcInserter;
+import inet.protocol.ieee8022.IIeee8022SnapChecker;
+import inet.protocol.ieee8022.IIeee8022SnapInserter;
 import inet.protocol.server.PreemptingServer;
-import inet.protocol.transceiver.PreemptibleTransmitter;
-import inet.protocol.transceiver.StreamingReceiver;
 import inet.protocol.transceiver.contract.IPacketReceiver;
 import inet.protocol.transceiver.contract.IPacketTransmitter;
 import inet.queueing.classifier.PacketClassifier;
 import inet.queueing.common.PacketMultiplexer;
+import inet.queueing.contract.IPacketClassifier;
 import inet.queueing.contract.IPacketFilter;
 import inet.queueing.contract.IPacketFlow;
 import inet.queueing.contract.IPacketQueue;
 import inet.queueing.contract.IPacketServer;
 import inet.queueing.contract.ITrafficConditioner;
 import inet.queueing.scheduler.PriorityScheduler;
-import inet.queueing.timing.TimingMeasurementMaker;
-import inet.queueing.timing.TimingMeasurementStarter;
-
-// TODO: add socket handling
-// TODO: dispatch for LLC/ethertype
-// TODO: connect/disconnect handling
 
 moduleinterface ISocketLayer
 {
@@ -204,7 +194,8 @@ module OmittedIeee8022LlcLayer like IIeee8022LlcLayer
         lowerLayerIn --> upperLayerOut;
 }
 
-module Ieee8022LlcLayer like IIeee8022LlcLayer
+
+module Ieee8022LlcLayer
 {
     parameters:
         @display("i=block/layer");
@@ -214,22 +205,50 @@ module Ieee8022LlcLayer like IIeee8022LlcLayer
         input lowerLayerIn;
         output lowerLayerOut;
     submodules:
-        llcInserter: <default("Ieee8022LlcInserter")> like IIeee8022LlcInserter {
+        classifier: <default("PacketClassifier")> like IPacketClassifier {
             @display("p=200,100");
+        }
+        snapInserter: <default("Ieee8022SnapInserter")> like IIeee8022SnapInserter if typename != "" {
+            @display("p=100,200");
+        }
+        m1: PacketMultiplexer {
+            @display("p=100,300");
+        }
+        llcInserter: <default("Ieee8022LlcInserter")> like IIeee8022LlcInserter if typename != "" {
+            @display("p=100,400");
+        }
+        m2: PacketMultiplexer {
+            @display("p=200,500");
         }
         protocolChecker: ProtocolChecker {
             @display("p=500,100");
         }
         llcChecker: <default("Ieee8022LlcChecker")> like IIeee8022LlcChecker {
-            @display("p=500,200");
+            @display("p=400,400");
+        }
+        snapChecker: <default("Ieee8022SnapChecker")> like IIeee8022SnapChecker {
+            @display("p=600,400");
+        }
+        dp: MessageDispatcher {
+            @display("p=500,300;b=100,5,,,,1");
         }
     connections:
-        upperLayerIn --> { @display("m=n"); } --> llcInserter.in;
-        llcInserter.out --> { @display("m=s"); } --> lowerLayerOut;
+        upperLayerIn --> { @display("m=n"); } --> classifier.in;
+        classifier.out++ --> snapInserter.in if exists(snapInserter);
+        classifier.out++ --> m2.in++ if exists(llcInserter);
+        classifier.out++ --> m1.in++;
+        llcInserter.out --> m2.in++ if exists(llcInserter);
+        snapInserter.out --> m1.in++ if exists(snapInserter);
+        m2.out --> { @display("m=s"); } --> lowerLayerOut;
 
-        lowerLayerIn --> { @display("m=s"); } --> llcChecker.in;
-        llcChecker.out --> protocolChecker.in;
+        lowerLayerIn --> { @display("m=s"); } --> dp.in++;
+        dp.out++ --> llcChecker.in;
         protocolChecker.out --> { @display("m=n"); } --> upperLayerOut;
+        m1.out --> llcInserter.in;
+        llcChecker.out --> dp.in++;
+        dp.out++ --> snapChecker.in;
+        snapChecker.out --> dp.in++;
+        dp.out++ --> protocolChecker.in;
 }
 
 moduleinterface IEthernetMacLayer
@@ -246,7 +265,12 @@ moduleinterface IEthernetMacLayer
 module EthernetMacLayer like IEthernetMacLayer
 {
     parameters:
-        paddingInserter.minLength = default(60B);
+        outboundEmitter.signalName = "packetSentToLower";
+        outboundEmitter.direction = "outbound";
+        outboundEmitter.protocolName = "ethernetmac";
+        inboundEmitter.signalName = "packetReceivedFromLower";
+        inboundEmitter.direction = "inbound";
+        inboundEmitter.protocolName = "ethernetmac";
         @display("i=block/layer");
     gates:
         input upperLayerIn;
@@ -254,78 +278,38 @@ module EthernetMacLayer like IEthernetMacLayer
         input lowerLayerIn;
         output lowerLayerOut;
     submodules:
-        typeOrLengthInserter: <default("EthernetTypeOrLengthInserter")> like IPacketFlow {
+        queue: <default("PacketQueue")> like IPacketQueue {
             @display("p=200,100");
         }
-        ctagInserter: <default("OmittedIeee8021qInserter")> like IIeee8021qInserter {
-            vlanTagType = "c";
+        server: <default("InstantServer")> like IPacketServer {
             @display("p=200,200");
         }
-        stagInserter: <default("OmittedIeee8021qInserter")> like IIeee8021qInserter {
-            vlanTagType = "s";
+        streamer: <default("OmittedPacketFlow")> like IPacketFlow {
             @display("p=200,300");
         }
-        addressInserter: <default("EthernetAddressInserter")> like IPacketFlow {
+        fcsInserter: <default("EthernetFcsInserter")> like IPacketFlow {
             @display("p=200,400");
         }
-        paddingInserter: <default("PaddingInserter")> like IPacketFlow {
+        outboundEmitter: <default("PacketEmitter")> like IPacketFlow {
             @display("p=200,500");
         }
-        queue: <default("PacketQueue")> like IPacketQueue {
-            @display("p=200,600");
-        }
-        server: <default("InstantServer")> like IPacketServer {
-            @display("p=200,700");
-        }
-        streamer: <default("OmittedPacketFlow")> like IPacketFlow {
-            @display("p=200,800");
-        }
-        fcsInserter: <default("EthernetFcsInserter")> like IPacketFlow {
-            @display("p=200,900");
-        }
-        preambleInserter: <default("EthernetPreambleInserter")> like IPacketFlow {
-            @display("p=200,1000");
-        }
-        typeOrLengthChecker: <default("EthernetTypeOrLengthChecker")> like IPacketFilter {
-            @display("p=500,100");
-        }
-        ctagChecker: <default("OmittedIeee8021qChecker")> like IIeee8021qChecker {
-            vlanTagType = "c";
-            @display("p=500,200");
-        }
-        stagChecker: <default("OmittedIeee8021qChecker")> like IIeee8021qChecker {
-            vlanTagType = "s";
-            @display("p=500,300");
-        }
-        addressChecker: <default("EthernetAddressChecker")> like IPacketFilter {
+        fcsChecker: <default("EthernetFcsChecker")> like IPacketFilter {
             @display("p=500,400");
         }
-        fcsChecker: <default("EthernetFcsChecker")> like IPacketFilter {
-            @display("p=500,900");
-        }
-        preambleChecker: <default("EthernetPreambleChecker")> like IPacketFilter {
-            @display("p=500,1000");
+        inboundEmitter: <default("PacketEmitter")> like IPacketFlow {
+            @display("p=500,500");
         }
     connections:
-        upperLayerIn --> { @display("m=n"); } --> typeOrLengthInserter.in;
-        typeOrLengthInserter.out --> ctagInserter.in;
-        ctagInserter.out --> stagInserter.in;
-        stagInserter.out --> addressInserter.in;
-        addressInserter.out --> paddingInserter.in;
-        paddingInserter.out --> queue.in;
+        upperLayerIn --> { @display("m=n"); } --> queue.in;
         queue.out --> server.in;
         server.out --> streamer.in;
         streamer.out --> fcsInserter.in;
-        fcsInserter.out --> preambleInserter.in;
-        preambleInserter.out --> { @display("m=s"); } --> lowerLayerOut;
+        fcsInserter.out --> outboundEmitter.in;
+        outboundEmitter.out --> { @display("m=s"); } --> lowerLayerOut;
 
-        lowerLayerIn --> { @display("m=s"); } --> preambleChecker.in;
-        preambleChecker.out --> fcsChecker.in;
-        fcsChecker.out --> addressChecker.in;
-        addressChecker.out --> stagChecker.in;
-        stagChecker.out --> ctagChecker.in;
-        ctagChecker.out --> typeOrLengthChecker.in;
-        typeOrLengthChecker.out --> { @display("m=n"); } --> upperLayerOut;
+        lowerLayerIn --> { @display("m=s"); } --> inboundEmitter.in;
+        inboundEmitter.out --> fcsChecker.in;
+        fcsChecker.out --> { @display("m=n"); } --> upperLayerOut;
 }
 
 module EthernetRawMacLayer extends EthernetMacLayer
@@ -361,11 +345,11 @@ module EthernetFragmentingMacLayer extends EthernetMacLayer
         preambleChecker.typename = default("EthernetFragmentPreambleChecker");
     submodules:
         defragmenter: FragmentTagBasedDefragmenter {
-            @display("p=500,800");
+            @display("p=500,300");
         }
     connections:
         fcsChecker.out --> { @reconnect; } --> defragmenter.in;
-        defragmenter.out --> { @reconnect; } --> addressChecker.in;
+        defragmenter.out --> { @reconnect;@display("m=n"); } --> upperLayerOut;
 }
 
 module EthernetPreemptingMacLayer like IEthernetMacLayer
@@ -397,7 +381,7 @@ module EthernetPreemptingMacLayer like IEthernetMacLayer
             @display("p=200,400");
         }
         inboundClassifier: PacketClassifier {
-            classifierClass = default("inet::PacketEthernetPreambleTypeClassifier");
+            classifierClass = default("inet::PacketFragmentTagClassifier");
             @display("p=600,300");
         }
         multiplexer: PacketMultiplexer {
@@ -441,6 +425,7 @@ module EthernetPhyLayer like IEthernetPhyLayer
         inboundEmitter.signalName = "packetReceivedFromLower";
         inboundEmitter.direction = "inbound";
         inboundEmitter.protocolName = "ethernetphy";
+        *.bitrate = default(bitrate);
         @display("i=block/layer");
     gates:
         input upperLayerIn;
@@ -448,83 +433,122 @@ module EthernetPhyLayer like IEthernetPhyLayer
         input lowerLayerIn;
         output lowerLayerOut;
     submodules:
-        outboundEmitter: <default("PacketEmitter")> like IPacketFlow {
-            @display("p=150,100");
+        preambleInserter: <default("EthernetPreambleInserter")> like IPacketFlow {
+            @display("p=200,100");
         }
         interFrameGapInserter: InterPacketGap {
             duration = default(96s / dropUnit(bitrate));
-            @display("p=150,200");
+            @display("p=200,200");
         }
-        transmitter: PreemptibleTransmitter {
+        outboundEmitter: <default("PacketEmitter")> like IPacketFlow {
+            @display("p=200,300");
+        }
+        transmitter: <default("PreemptibleTransmitter")> like IPacketTransmitter {
             datarate = default(bitrate);
-            @display("p=150,300");
+            @display("p=200,400");
+        }
+        preambleChecker: <default("EthernetPreambleChecker")> like IPacketFilter {
+            @display("p=500,100");
         }
         inboundEmitter: <default("PacketEmitter")> like IPacketFlow {
-            @display("p=350,100");
+            @display("p=500,300");
         }
-        receiver: StreamingReceiver {
+        receiver: <default("StreamingReceiver")> like IPacketReceiver {
             datarate = default(bitrate);
-            @display("p=350,300");
+            @display("p=500,400");
         }
     connections:
-        upperLayerIn --> { @display("m=n"); } --> outboundEmitter.in;
-        outboundEmitter.out --> interFrameGapInserter.in;
-        interFrameGapInserter.out --> transmitter.in;
+        upperLayerIn --> { @display("m=n"); } --> preambleInserter.in;
+        preambleInserter.out --> interFrameGapInserter.in;
+        interFrameGapInserter.out --> outboundEmitter.in;
+        outboundEmitter.out --> transmitter.in;
         transmitter.out --> { @display("m=s"); } --> lowerLayerOut;
 
         lowerLayerIn --> { @display("m=s"); } --> receiver.in;
         receiver.out --> inboundEmitter.in;
-        inboundEmitter.out --> { @display("m=n"); } --> upperLayerOut;
+        inboundEmitter.out --> preambleChecker.in;
+        preambleChecker.out --> { @display("m=n"); } --> upperLayerOut;
 }
 
-module LayeredEthernetInterface extends InterfaceEntry like IEthernetInterface
+module EthernetPreemptingPhyLayer like IEthernetPhyLayer
 {
     parameters:
-        bool broadcast = default(true);
-        bool multicast = default(true);
-        string address = default("auto");
-        double bitrate @unit(bps);
-        string interfaceTableModule;
+        volatile double bitrate @unit(bps);
+        outboundEmitter.signalName = "packetSentToLower";
+        outboundEmitter.direction = "outbound";
+        outboundEmitter.protocolName = "ethernetphy";
+        inboundEmitter.signalName = "packetReceivedFromLower";
+        inboundEmitter.direction = "inbound";
+        inboundEmitter.protocolName = "ethernetphy";
         *.bitrate = default(bitrate);
-        @class(InterfaceEntry);
-        @display("i=block/ifcard;bgb=600,");
+        @display("i=block/layer");
     gates:
         input upperLayerIn;
         output upperLayerOut;
-        inout phys;
+        input lowerLayerIn;
+        output lowerLayerOut;
     submodules:
-        socketLayer: <default("OmittedSocketLayer")> like ISocketLayer {
-            @display("p=400,100");
+        preambleInserter: <default("EthernetPreambleInserter")> like IPacketFlow {
+            @display("p=91,115");
         }
-        measurementLayer: <default("OmittedMeasurementLayer")> like IMeasurementLayer {
-            @display("p=400,200");
+        interFrameGapInserter: InterPacketGap {
+            duration = default(96s / dropUnit(bitrate));
+            @display("p=200,200");
         }
-        trafficConditionerLayer: <default("OmittedTrafficConditionerLayer")> like ITrafficConditionerLayer {
-            @display("p=400,300");
+        outboundEmitter: <default("PacketEmitter")> like IPacketFlow {
+            @display("p=200,300");
         }
-        llcLayer: <default("OmittedIeee8022LlcLayer")> like IIeee8022LlcLayer {
-            @display("p=400,400");
+        transmitter: <default("PreemptibleTransmitter")> like IPacketTransmitter {
+            datarate = default(bitrate);
+            @display("p=200,400");
         }
-        macLayer: <default("EthernetMacLayer")> like IEthernetMacLayer {
-            @display("p=400,500");
+        preambleChecker: <default("EthernetPreambleChecker")> like IPacketFilter {
+            @display("p=418,161");
         }
-        phyLayer: <default("EthernetPhyLayer")> like IEthernetPhyLayer {
-            @display("p=400,600");
+        inboundEmitter: <default("PacketEmitter")> like IPacketFlow {
+            @display("p=500,300");
+        }
+        receiver: <default("StreamingReceiver")> like IPacketReceiver {
+            datarate = default(bitrate);
+            @display("p=500,400");
+        }
+        packetClassifier: PacketClassifier {
+            classifierClass = default("inet::PacketEthernetPreambleTypeClassifier");
+            @display("p=500,200");
+        }
+        packetMultiplexer: PacketMultiplexer {
+            @display("p=500,100");
+        }
+        preambleInserter1: <default("EthernetFragmentPreambleInserter")> like IPacketFlow {
+            @display("p=304,106");
+        }
+        preambleChecker1: <default("EthernetFragmentPreambleChecker")> like IPacketFilter {
+            @display("p=606,161");
+        }
+        packetClassifier1: PacketClassifier {
+            classifierClass = default("inet::PacketFragmentTagClassifier");
+            @display("p=200,42");
+        }
+        packetMultiplexer1: PacketMultiplexer {
+            @display("p=200,161");
         }
     connections:
-        upperLayerIn --> { @display("m=n"); } --> socketLayer.upperLayerIn;
-        socketLayer.lowerLayerOut --> measurementLayer.upperLayerIn;
-        measurementLayer.lowerLayerOut --> trafficConditionerLayer.upperLayerIn;
-        trafficConditionerLayer.lowerLayerOut --> llcLayer.upperLayerIn;
-        llcLayer.lowerLayerOut --> macLayer.upperLayerIn;
-        macLayer.lowerLayerOut --> phyLayer.upperLayerIn;
-        phyLayer.lowerLayerOut --> { @display("m=s"); } --> phys$o;
+        interFrameGapInserter.out --> outboundEmitter.in;
+        outboundEmitter.out --> transmitter.in;
+        transmitter.out --> { @display("m=s"); } --> lowerLayerOut;
 
-        phys$i --> { @display("m=s"); } --> phyLayer.lowerLayerIn;
-        phyLayer.upperLayerOut --> macLayer.lowerLayerIn;
-        macLayer.upperLayerOut --> llcLayer.lowerLayerIn;
-        llcLayer.upperLayerOut --> trafficConditionerLayer.lowerLayerIn;
-        trafficConditionerLayer.upperLayerOut --> measurementLayer.lowerLayerIn;
-        measurementLayer.upperLayerOut --> socketLayer.lowerLayerIn;
-        socketLayer.upperLayerOut --> { @display("m=n"); } --> upperLayerOut;
+        lowerLayerIn --> { @display("m=s"); } --> receiver.in;
+        receiver.out --> inboundEmitter.in;
+        upperLayerIn --> packetClassifier1.in;
+        packetClassifier1.out++ --> preambleInserter.in;
+        packetClassifier1.out++ --> preambleInserter1.in;
+        preambleInserter.out --> packetMultiplexer1.in++;
+        preambleInserter1.out --> packetMultiplexer1.in++;
+        packetMultiplexer1.out --> interFrameGapInserter.in;
+        inboundEmitter.out --> packetClassifier.in;
+        packetClassifier.out++ --> preambleChecker.in;
+        packetClassifier.out++ --> preambleChecker1.in;
+        preambleChecker.out --> packetMultiplexer.in++;
+        preambleChecker1.out --> packetMultiplexer.in++;
+        packetMultiplexer.out --> upperLayerOut;
 }

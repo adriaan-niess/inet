@@ -242,7 +242,10 @@ void MessageDispatcher::handleRegisterProtocol(const Protocol& protocol, cGate *
 {
     Enter_Method("handleRegisterProtocol");
     auto key = Key(protocol.getId(), servicePrimitive);
-    if (protocolToGateIndex.find(key) != protocolToGateIndex.end())
+    auto it = protocolToGateIndex.find(key);
+    if (it->second == g->getIndex())
+        return;
+    if (it != protocolToGateIndex.end())
         throw cRuntimeError("handleRegisterProtocol(): protocol is already registered: %s", protocol.str().c_str());
     protocolToGateIndex[key] = g->getIndex();
     auto gateName = g->getType() == cGate::INPUT ? "out" : "in";

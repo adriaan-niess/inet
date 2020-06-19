@@ -32,11 +32,11 @@ module InterfaceEntry
         pcapRecorder[numPcapRecorders]: PcapRecorder {
             parameters:
                 moduleNamePatterns = ".^";
-                @display("p=100,100;is=s");
+                @display("p=200,100;is=s");
         }
         clock: <default("")> like IClock if typename != "" {
             parameters:
-                @display("p=100,200;is=s");
+                @display("p=200,200;is=s");
         }
 }
 

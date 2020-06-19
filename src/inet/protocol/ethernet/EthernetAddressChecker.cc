@@ -33,8 +33,9 @@ void EthernetAddressChecker::initialize(int stage)
     if (stage == INITSTAGE_LOCAL) {
         promiscuous = par("promiscuous");
         interfaceTable = getModuleFromPar<IInterfaceTable>(par("interfaceTableModule"), this);
-        registerProtocol(Protocol::ethernetMac, nullptr, inputGate);
     }
+    else if (stage == INITSTAGE_LINK_LAYER)
+        registerProtocol(Protocol::ethernetMac, nullptr, inputGate);
 }
 
 void EthernetAddressChecker::processPacket(Packet *packet)
